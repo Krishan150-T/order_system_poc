@@ -27,8 +27,10 @@ import { AppService } from "./app.service";
     TypeOrmModule.forFeature([Product]),
     BullModule.forRoot({
       redis: {
-        host: process.env.REDIS_HOST || "localhost",
-        port: Number(process.env.REDIS_PORT) || 6379,
+        host: process.env.REDIS_HOST,
+        username: process.env.REDIS_USERNAME || "default",
+        port: Number(process.env.REDIS_PORT),
+        password: process.env.REDIS_PASSWORD,
       },
     }),
     OrdersModule,

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { DataSource, EntityManager, Repository } from "typeorm";
@@ -13,9 +14,12 @@ import { Order } from "./entities/order.entity";
 import { OrderItem } from "./entities/order-item.entity";
 import { OrderStatus } from "../common/enums/order-status.enum";
 import { IdempotencyService } from "../common/services/idempotency.service";
+import { IdempotencyStatus } from "../common/entities/idempotency-key.entity";
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private readonly dataSource: DataSource,
     @InjectRepository(Order)
@@ -30,33 +34,31 @@ export class OrdersService {
   ) {}
 
   async createOrder(createOrderDto: CreateOrderDto, idempotencyKey?: string) {
+    this.logger.log("Creating order for customer " + createOrderDto.customerId);
     if (!idempotencyKey) {
       throw new BadRequestException("Idempotency key is required");
     }
 
     const requestHash =
       await this.idempotencyService.computeRequestHash(createOrderDto);
+    const existingKey = await this.idempotencyService.registerPendingKey(
+      idempotencyKey,
+      requestHash,
+    );
+
+    // If the key already exists and is completed, return cached response
+    if (
+      existingKey.status === IdempotencyStatus.COMPLETED &&
+      existingKey.responseData
+    ) {
+      return JSON.parse(existingKey.responseData);
+    }
+
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
     try {
-      const existingKey = await this.idempotencyService.registerPendingKey(
-        idempotencyKey,
-        requestHash,
-      );
-
-      if (existingKey.status === "COMPLETED" && existingKey.responseData) {
-        await queryRunner.rollbackTransaction();
-        return JSON.parse(existingKey.responseData);
-      }
-      if (existingKey.status === "PENDING") {
-        await queryRunner.rollbackTransaction();
-        throw new ConflictException(
-          "Order is already being processed for this idempotency key",
-        );
-      }
-
       const order = this.orderRepository.create({
         customerId: createOrderDto.customerId,
         paymentMethod: createOrderDto.paymentMethod,
@@ -108,12 +110,18 @@ export class OrdersService {
         items: savedOrder.items,
       };
 
-      await this.idempotencyService.completeKey(idempotencyKey, response);
+      await this.idempotencyService.completeKey(
+        idempotencyKey,
+        response,
+        queryRunner,
+      );
       await queryRunner.commitTransaction();
       await this.queueService.enqueueOrderProcessing(savedOrder.id);
       return response;
     } catch (error) {
-      await queryRunner.rollbackTransaction();
+      if (queryRunner.isTransactionActive) {
+        await queryRunner.rollbackTransaction();
+      }
       if (error instanceof ConflictException) {
         throw error;
       }

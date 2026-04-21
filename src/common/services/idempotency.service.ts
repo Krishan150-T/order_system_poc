@@ -1,6 +1,6 @@
 import { ConflictException, Injectable } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { DataSource, Repository } from "typeorm";
+import { DataSource, QueryFailedError, Repository } from "typeorm";
 import {
   IdempotencyKey,
   IdempotencyStatus,
@@ -50,18 +50,26 @@ export class IdempotencyService {
       });
       return await this.idempotencyRepository.save(record);
     } catch (error) {
-      const existing = await this.idempotencyRepository.findOne({
-        where: { key },
-      });
-      if (!existing) {
-        throw error;
+      // Only handle unique constraint violations (PostgreSQL code 23505)
+      if (
+        error instanceof QueryFailedError &&
+        error.driverError?.code === "23505"
+      ) {
+        const existing = await this.idempotencyRepository.findOne({
+          where: { key },
+        });
+        if (!existing) {
+          throw error; // Re-throw if we can't find the existing record
+        }
+        if (existing.requestHash !== requestHash) {
+          throw new ConflictException(
+            "Idempotency key already used with different payload",
+          );
+        }
+        return existing;
       }
-      if (existing.requestHash !== requestHash) {
-        throw new ConflictException(
-          "Idempotency key already used with different payload",
-        );
-      }
-      return existing;
+      // Re-throw any other errors
+      throw error;
     }
   }
 
@@ -69,10 +77,24 @@ export class IdempotencyService {
     return this.idempotencyRepository.findOne({ where: { key } });
   }
 
-  async completeKey(key: string, responseData: unknown): Promise<void> {
-    await this.idempotencyRepository.update(key, {
+  async deleteKey(key: string): Promise<void> {
+    await this.idempotencyRepository.delete(key);
+  }
+
+  async completeKey(
+    key: string,
+    responseData: unknown,
+    queryRunner?: any,
+  ): Promise<void> {
+    const updateData = {
       status: IdempotencyStatus.COMPLETED,
       responseData: JSON.stringify(responseData),
-    });
+    };
+
+    if (queryRunner) {
+      await queryRunner.manager.update(IdempotencyKey, key, updateData);
+    } else {
+      await this.idempotencyRepository.update(key, updateData);
+    }
   }
 }

@@ -24,7 +24,7 @@ export class PaymentsService {
     });
     const savedTransaction = await this.transactionRepository.save(transaction);
 
-    const success = Math.random() > 0.25;
+    const success = Math.random() > 0;
     savedTransaction.attempts += 1;
     savedTransaction.status = success
       ? PaymentStatus.SUCCEEDED
